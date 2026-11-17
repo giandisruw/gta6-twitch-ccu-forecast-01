@@ -1,47 +1,54 @@
-// gta6-twitch-ccu-forecast-01 entry (Node 22, standard library only).
+// gta6-twitch-ccu-forecast-01 entry v2 (Node 22, standard library only).
 //
 // Forecast: for each hour h = 2..24 of the release day, five quantiles of the
 // Twitch concurrent-viewer count in the game's category, given hour 1's print.
 //
-// Model — log-log regression on rolling-midnight launches.
-// ---------------------------------------------------------------------------
-// Hour 1 of a UTC release day only ever sees the regions that have already
-// unlocked (New Zealand, Australia, parts of Asia and Europe), while the
-// evening peak is set by the whole world, above all the US unlocks at 05:00Z
-// and 08:00Z. So an hour's count does NOT scale with hour 1's print the way a
-// persistence forecast assumes: across the 38 past launches in the case file,
-// log(peak viewers) is almost independent of log(hour-1 viewers)
-// (correlation -0.94 between log hour-1 and the log peak ratio, slope -0.93).
-// The right structure is a regression in log space, fit per hour:
+// Model — log-log regression on rolling-midnight launches, with two changes
+// over v1 (practice 0.1542):
 //
-//   log(viewers_h) = a_h + b_h * log(viewers_1)
+//  1. Block-constant slopes. v1 fitted one slope per hour and smoothed it
+//     with a 3-point moving average. With only ~12 launches a per-hour slope
+//     is mostly noise, while the true slope profile is a slow curve: ~1.0
+//     for hours 2-4 (the same regions are still the only ones awake), ~0.6
+//     through the middle of the day, ~0.5 for the evening (the global
+//     audience dominates). v2 pools the slope within four hour blocks
+//     (2-4, 5-9, 10-16, 17-24) by a stacked regression with hour dummies,
+//     and fits one intercept per hour from its block slope. Pooling cuts the
+//     slope's estimation variance roughly fourfold; the per-hour intercept
+//     keeps each hour's level free.
 //
-// fit on the comparables whose unlock rolled at local midnight — the same
-// unlock shape as GTA VI and as the four practice launches. The fitted slope
-// is ~1.0 for hours 2-4 (the same regions are still the only ones awake) and
-// falls to ~0.5 for the evening hours (the global audience dominates), which
-// is exactly the shape the data shows. Slopes are smoothed with a 3-point
-// moving average across neighbouring hours, because neighbouring hours share
-// the same audience dynamics and the per-hour fits use only ~12 launches.
-// The spread of an hour is the inter-quartile range of that hour's regression
-// residuals divided by 1.349 (a robust estimate of the log-scale sigma, not
-// inflated by one odd launch the way a plain standard deviation is), floored
-// at 0.08 and capped at 1.2 log units. Quantiles are then
-// q_tau = median_h * exp(z_tau * sigma_h), the median clamped to
-// [0.05, 20] times hour 1's print so an out-of-range print can never produce
-// an absurd forecast.
+//  2. Honest out-of-sample spread. v1 set each hour's spread from the
+//     in-sample regression residuals, which understate how far a NEW launch
+//     lands from the line (the fit has seen those launches). v2 leaves each
+//     training launch out in turn, predicts it from the other eleven, and
+//     takes the quantiles of those leave-one-out residuals — the spread a
+//     genuinely new launch faces. Each quantile is half the empirical
+//     leave-one-out residual quantile and half a Gaussian quantile with
+//     sigma 0.3 (the typical residual scale), so the tails stay sane with
+//     only twelve residuals while the skew the data shows (residuals run
+//     right-skewed mid-day) is kept.
 //
-// What was tried and dropped (measured on the four practice cases, whose
-// answers were re-read from the public SullyGnome source the kit itself
-// names, and scored with the contest's own pinball loss):
-//   - persistence (house baseline): mean loss 0.387
-//   - median log-ratio shape across all comparables: 0.284
-//   - per-hour log-log regression on rolling launches: 0.164
-//   - + slope smoothing, IQR spread: 0.154 (this entry)
-//   - adding hour-1 channels as a second regressor: no gain (0.166)
-//   - a peak-level + median-shape split: worse (0.183)
-//   - blending the regression with the median-ratio shape: worse (0.177+)
-//   - dropping the worst residual per hour and refitting: worse (0.171)
+// Measured on the four practice cases (answers re-read from the public
+// SullyGnome source the kit names, scored with the contest's pinball loss):
+//   v1: 0.187 / 0.103 / 0.104 / 0.224, mean 0.1542
+//   v2: 0.170 / 0.109 / 0.104 / 0.206, mean 0.1471
+// Leave-one-out over the twelve rolling-midnight comparables (each held-out
+// launch scored against its own real curve): v1 0.2543, v2 0.2458.
+// The gain is modest and the block choice moves the practice mean by
+// ~0.005 across reasonable partitions, so v2 is an improvement, not a
+// breakthrough: it does not reach the ~0.144 paid bar on practice.
+//
+// What was tried and dropped (same practice + leave-one-out scoring):
+//   - shrinking evening slopes toward the unconditional mean: practice
+//     0.138 but leave-one-out 0.267 — it only fits Wolverine's odd evening
+//     and hurts 9 of 12 held-out launches; rejected as overfitting.
+//   - median shift by the residual median: practice 0.149, leave-one-out
+//     0.258 — no leave-one-out gain; rejected.
+//   - Theil-Sen slopes: leave-one-out 0.248 but practice 0.171; rejected.
+//   - k-nearest-neighbour shape, level+shape split, second regressors
+//     (pre-release level, hour-1 channels), recency/similarity weights,
+//     all 37 comparables instead of the rolling 12: all worse on one or
+//     both scores; rejected.
 //
 // The entry reads only the case file it is given, runs offline with no
 // network and no randomness, and is deterministic: two runs on the same case
@@ -63,11 +70,17 @@ const Z = [-1.645, -0.674, 0, 0.674, 1.645];
 /** Lowest and highest median the model may output, as a multiple of hour 1. */
 const MEDIAN_FLOOR_RATIO = 0.05;
 const MEDIAN_CAP_RATIO = 20;
-/** Bounds on the per-hour log spread. */
-const SIGMA_FLOOR = 0.08;
-const SIGMA_CAP = 1.2;
+/** The Gaussian half of each quantile uses this log-scale sigma. */
+const GAUSS_SIGMA = 0.3;
 /** A regression needs at least this many launches to be trusted. */
 const MIN_LAUNCHES = 4;
+/** Hour blocks sharing one pooled log-log slope. */
+const BLOCKS: Array<[number, number]> = [
+  [2, 4],
+  [5, 9],
+  [10, 16],
+  [17, 24],
+];
 
 interface CaseFile {
   levels: number[];
@@ -89,13 +102,6 @@ interface LaunchCurve {
 
 /** x rounded to 2 decimals (half up), as the house baseline rounds. */
 const round2 = (x: number): number => Math.round(x * 100) / 100;
-
-/** Median of a non-empty list of numbers. */
-const medianOf = (xs: number[]): number => {
-  const s = [...xs].sort((a, b) => a - b);
-  const m = s.length >> 1;
-  return s.length % 2 === 1 ? s[m] : (s[m - 1] + s[m]) / 2;
-};
 
 /** The p-th quantile of a list, by linear interpolation on sorted values. */
 const quantileOf = (xs: number[], p: number): number => {
@@ -138,31 +144,61 @@ const releaseDayCurve = (c: CaseFile['comparables'][number]): LaunchCurve | null
   return { name: c.name, logViewers };
 };
 
-/** Ordinary least squares of y on x; returns intercept, slope and residuals. */
-const leastSquares = (
-  xs: number[],
-  ys: number[],
-): { a: number; b: number; residuals: number[] } => {
-  const n = xs.length;
-  const mx = xs.reduce((s, x) => s + x, 0) / n;
-  const my = ys.reduce((s, y) => s + y, 0) / n;
-  let sxx = 0;
-  let sxy = 0;
-  for (let i = 0; i < n; i++) {
-    sxx += (xs[i] - mx) * (xs[i] - mx);
-    sxy += (xs[i] - mx) * (ys[i] - my);
+/**
+ * The log median of each forecast hour under the block-slope model:
+ * one pooled slope per hour block (stacked regression with hour dummies),
+ * one intercept per hour. `hours` are the forecast hours (2..24).
+ */
+const blockSlopeMedians = (
+  launches: LaunchCurve[],
+  logP1: number,
+  hours: number[],
+): Map<number, number> => {
+  const xs = launches.map((lc) => lc.logViewers[0]);
+  const mx = xs.reduce((s, x) => s + x, 0) / xs.length;
+  const medians = new Map<number, number>();
+  for (const [lo, hi] of BLOCKS) {
+    // Pooled slope over the block: within-hour demeaned regression.
+    let num = 0;
+    let den = 0;
+    for (let h = lo; h <= hi; h++) {
+      const ys = launches.map((lc) => lc.logViewers[h - 1]);
+      const my = ys.reduce((s, y) => s + y, 0) / ys.length;
+      for (let i = 0; i < launches.length; i++) {
+        num += (xs[i] - mx) * (ys[i] - my);
+        den += (xs[i] - mx) * (xs[i] - mx);
+      }
+    }
+    const b = den > 0 ? num / den : 0;
+    for (let h = lo; h <= hi; h++) {
+      if (!hours.includes(h)) continue;
+      const ys = launches.map((lc) => lc.logViewers[h - 1]);
+      const my = ys.reduce((s, y) => s + y, 0) / ys.length;
+      const a = my - b * mx;
+      let mu = a + b * logP1;
+      mu = Math.max(
+        logP1 + Math.log(MEDIAN_FLOOR_RATIO),
+        Math.min(logP1 + Math.log(MEDIAN_CAP_RATIO), mu),
+      );
+      medians.set(h, mu);
+    }
   }
-  const b = sxx > 0 ? sxy / sxx : 0;
-  const a = my - b * mx;
-  return { a, b, residuals: ys.map((y, i) => y - (a + b * xs[i])) };
+  return medians;
 };
 
 /**
- * The five quantiles for one hour. `mu` is the log median, `sigma` the
- * log spread; both are already fitted and clamped by the caller.
+ * The five quantiles for one hour. `mu` is the log median (already fitted
+ * and clamped); `looResid` are that hour's leave-one-out residuals, the
+ * honest spread of a new launch around the line.
  */
-const hourQuantiles = (mu: number, sigma: number): number[] => {
-  const q = Z.map((z) => round2(Math.max(1, Math.exp(mu + z * sigma))));
+const hourQuantiles = (mu: number, looResid: number[]): number[] => {
+  // Centre on the rounded median, as the scorer's reference does.
+  const centre = Math.log(Math.max(1, round2(Math.exp(mu))));
+  const q = LEVELS.map((tau, j) => {
+    const emp = quantileOf(looResid, tau);
+    const gauss = Z[j] * GAUSS_SIGMA;
+    return round2(Math.max(1, Math.exp(centre + 0.5 * emp + 0.5 * gauss)));
+  });
   for (let j = 1; j < q.length; j++) {
     if (q[j] < q[j - 1]) q[j] = q[j - 1];
   }
@@ -187,6 +223,7 @@ const forecastCase = (c: CaseFile): Array<{ hour: number; q: number[] }> => {
   const first = c.known.find((k) => k.hour === 1);
   const p1 = Math.max(1, first?.viewers ?? 1);
   const logP1 = Math.log(p1);
+  const hours = c.forecast.map(({ hour }) => hour);
 
   // Rolling-midnight launches with a complete release day, in name order so
   // the fit — and therefore the output — is the same on every run.
@@ -202,59 +239,37 @@ const forecastCase = (c: CaseFile): Array<{ hour: number; q: number[] }> => {
       .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   }
   if (launches.length < MIN_LAUNCHES) {
-    return c.forecast.map(({ hour }) => ({ hour, q: persistenceQuantiles(p1, hour) }));
+    return hours.map((hour) => ({ hour, q: persistenceQuantiles(p1, hour) }));
   }
 
-  const logV1 = launches.map((lc) => lc.logViewers[0]);
-
-  // One log-log regression per hour: log(viewers_h) on log(viewers_1).
-  const fits = c.forecast.map(({ hour }) => {
-    const ys = launches.map((lc) => lc.logViewers[hour - 1]);
-    return leastSquares(logV1, ys);
-  });
-
-  // Smooth the slopes across neighbouring hours (a 3-point moving average).
-  // Neighbouring hours share the same audience dynamics, and each hourly fit
-  // rests on only a dozen launches, so the raw slopes are noisy. The
-  // intercept is re-anchored to the sample means so the smoothed slope still
-  // passes through the centre of the data.
-  const smoothedSlopes = fits.map((fit, i) => {
-    const lo = Math.max(0, i - 1);
-    const hi = Math.min(fits.length - 1, i + 1);
-    let sum = 0;
-    let count = 0;
-    for (let j = lo; j <= hi; j++) {
-      sum += fits[j].b;
-      count++;
+  // Leave-one-out residuals: each launch predicted from the other launches,
+  // so the spread is what a genuinely new launch faces, not the in-sample
+  // fit's own residuals.
+  const looResid = new Map<number, number[]>();
+  for (const h of hours) looResid.set(h, []);
+  for (let i = 0; i < launches.length; i++) {
+    const held = launches[i];
+    const rest = launches.filter((_, j) => j !== i);
+    if (rest.length < MIN_LAUNCHES) continue;
+    const medians = blockSlopeMedians(rest, held.logViewers[0], hours);
+    for (const h of hours) {
+      looResid.get(h)?.push(held.logViewers[h - 1] - (medians.get(h) as number));
     }
-    return sum / count;
-  });
-  const means = fits.map((_, i) => {
-    const ys = launches.map((lc) => lc.logViewers[c.forecast[i].hour - 1]);
-    return {
-      mx: logV1.reduce((s, x) => s + x, 0) / logV1.length,
-      my: ys.reduce((s, y) => s + y, 0) / ys.length,
-    };
-  });
+  }
 
-  return c.forecast.map(({ hour }, i) => {
-    const fit = fits[i];
-    const b = smoothedSlopes[i];
-    const a = means[i].my - b * means[i].mx;
-    // The log median, clamped so an out-of-range hour-1 print can never
-    // produce an absurd forecast.
-    let mu = a + b * logP1;
-    mu = Math.max(
-      logP1 + Math.log(MEDIAN_FLOOR_RATIO),
-      Math.min(logP1 + Math.log(MEDIAN_CAP_RATIO), mu),
-    );
-    // A robust spread: the residuals' inter-quartile range, in log units.
-    // (A plain standard deviation is inflated by the oddest launch; the IQR
-    // is not, and on the practice it also scores better.)
-    const iqr =
-      quantileOf(fit.residuals, 0.75) - quantileOf(fit.residuals, 0.25);
-    const sigma = Math.max(SIGMA_FLOOR, Math.min(SIGMA_CAP, iqr / 1.349));
-    return { hour, q: hourQuantiles(mu, sigma) };
+  const medians = blockSlopeMedians(launches, logP1, hours);
+  return hours.map((hour) => {
+    const mu = medians.get(hour) as number;
+    const resid = looResid.get(hour) as number[];
+    // If the leave-one-out pass found nothing (tiny training set), fall
+    // back to a Gaussian spread of the usual scale.
+    const q = resid.length >= 4
+      ? hourQuantiles(mu, resid)
+      : Z.map((z) => round2(Math.max(1, Math.exp(mu + z * GAUSS_SIGMA))));
+    for (let j = 1; j < q.length; j++) {
+      if (q[j] < q[j - 1]) q[j] = q[j - 1];
+    }
+    return { hour, q };
   });
 };
 
