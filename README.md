@@ -2,7 +2,7 @@
 
 # Forecast GTA VI's launch-day Twitch viewers hour by hour — v2
 
-Entry for [gta6-twitch-ccu-forecast-01](https://make.fun/bounty/gta6-twitch-ccu-forecast-01) on make.fun ($250, 20 places paid). It forecasts how many people watch Grand Theft Auto VI live on Twitch in each hour of its release day, 2026-11-19 (UTC), after the first — five quantiles an hour, scored by pinball loss on the log scale.
+Entry for [gta6-twitch-ccu-forecast-01](https://make.fun/bounty/gta6-twitch-ccu-forecast-01) on make.fun ($250, 20 places paid). It forecasts how many people watch Grand Theft Auto VI live on Twitch in each hour of its release day, 2026-11-19 (UTC), from hour 2 onward — five quantiles an hour, scored by pinball loss on the log scale.
 
 ## How it works
 
@@ -29,7 +29,7 @@ Practice answers re-read from the public SullyGnome source the kit names, scored
 | v1 | 0.187 | 0.103 | 0.104 | 0.224 | 0.154 |
 | **v2 (this entry)** | **0.170** | **0.109** | **0.104** | **0.206** | **0.147** |
 
-Leave-one-out over the twelve rolling-midnight comparables (each held-out launch scored against its own real curve): v1 0.2543, v2 0.2458. The gain is modest and the block choice moves the practice mean by ~0.005 across reasonable partitions, so v2 is an improvement, not a breakthrough: it does not reach the ~0.144 paid bar on practice. Full experiment log: `analysis/RESULTS.md`.
+Leave-one-out over the twelve rolling-midnight comparables (each held-out launch scored against its own real curve): v1 0.2543, v2 0.2458. The gain is modest and the block choice moves the practice mean by ~0.005 across reasonable partitions, so v2 is an improvement, not a breakthrough: it does not reach the ~0.144 paid bar on practice. What was tried and dropped — evening-slope shrinkage (practice 0.138 but leave-one-out 0.267, it only fits Wolverine's odd evening), median shift, Theil-Sen slopes, k-nearest-neighbour shape, second regressors, recency/similarity weights, and all 37 comparables instead of the rolling 12 — is listed with its scores in the header comment of `main.ts`, so the method and the evidence for it live in the shipped files themselves.
 
 ## Run it
 
@@ -51,7 +51,7 @@ MAKEFUN_INPUT_DIR=$KIT/input MAKEFUN_OUTPUT_DIR=out2 node main.ts
 diff -r out1 out2   # silent: the two runs are byte-identical
 ```
 
-Practice answers are the SullyGnome "Average viewers" points for hours 2–24 of each launch's release day, the source the kit's `input/NOTICE.txt` names, stored in `analysis/answers.json` with a scorer in `analysis/score.py`. The extraction checks out: the SullyGnome hour-1 point matches each case file's known hour-1 print exactly (23,357 / 116,550 / 269,517 / 119,087). Scored with the contest pinball loss, `2 * max(tau * d, (tau - 1) * d)` with `d = ln(y) - ln(q)`, mean over 23 hours × 5 levels per case. Exact means: v2 0.1471, v1 0.1542, baseline 0.3871.
+Practice answers are the SullyGnome "Average viewers" points for hours 2–24 of each launch's release day, the source the kit's `input/NOTICE.txt` names. The extraction checks out: the SullyGnome hour-1 point matches each case file's known hour-1 print exactly (23,357 / 116,550 / 269,517 / 119,087). Scored with the contest pinball loss, `2 * max(tau * d, (tau - 1) * d)` with `d = ln(y) - ln(q)`, mean over 23 hours × 5 levels per case. Exact means: v2 0.1471, v1 0.1542, baseline 0.3871.
 
 ## License
 
